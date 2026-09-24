@@ -2,12 +2,19 @@ import React,{useEffect,useMemo,useState} from "react";
 import {createRoot} from "react-dom/client";
 import {supabase} from "./supabase";
 import "./styles.css";
+import Hangman, { hangmanInitialState } from "./games/Hangman/Hangman";
+import TriviaDuel, { triviaInitialState } from "./games/TriviaDuel/TriviaDuel";
+import Scribble, { scribbleInitialState } from "./games/Scribble/Scribble";
+import { generateGameContent } from "./services/gameContent";
 
 const GAME_LIST=[
  {id:"tictactoe",icon:"⭕",title:"Tic Tac Toe",desc:"Classic 3×3 showdown."},
  {id:"rps",icon:"✊",title:"Rock Paper Scissors",desc:"Choose secretly, reveal together."},
  {id:"wouldrather",icon:"🤔",title:"Would You Rather",desc:"Pick without seeing their answer."},
- {id:"whoknows",icon:"👀",title:"Who Knows Who?",desc:"Predict who your partner chooses."}
+ {id:"whoknows",icon:"👀",title:"Who Knows Who?",desc:"Predict who your partner chooses."},
+ {id:"hangman",icon:"🔤",title:"Hangman",desc:"Guess the word together."},
+ {id:"triviaduel",icon:"⏱️",title:"Trivia Duel",desc:"Fast-paced questions."},
+ {id:"scribble",icon:"🎨",title:"Scribble",desc:"Draw and guess."}
 ];
 
 const WR=[
@@ -115,14 +122,20 @@ function Game({game,room,me,isHost,update}){
  if(game==="tictactoe")return <TicTacToe room={room} me={me} isHost={isHost} update={update}/>;
  if(game==="rps")return <RPS room={room} me={me} isHost={isHost} update={update}/>;
  if(game==="wouldrather")return <WouldRather room={room} me={me} update={update}/>;
+ if(game==="hangman")return <Hangman room={room} me={me} isHost={isHost} update={update}/>;
+ if(game==="triviaduel")return <TriviaDuel room={room} me={me} isHost={isHost} update={update}/>;
+ if(game==="scribble")return <Scribble room={room} me={me} isHost={isHost} update={update}/>;
  return <WhoKnows room={room} me={me} update={update}/>;
 }
 
 function initialState(game){
  if(game==="tictactoe")return {board:Array(9).fill(null),turn:"host",winner:null};
  if(game==="rps")return {host:null,guest:null,result:null};
- if(game==="wouldrather")return {i:0,answers:{},revealed:false,matches:0,done:false};
- return {i:0,answers:{},revealed:false,matches:0,done:false};
+ if(game==="wouldrather")return {i:0,answers:{},revealed:false,matches:0,done:false, deck: [], generating: true};
+ if(game==="hangman")return hangmanInitialState();
+ if(game==="triviaduel")return triviaInitialState();
+ if(game==="scribble")return scribbleInitialState();
+ return {i:0,answers:{},revealed:false,matches:0,done:false, deck: [], generating: true}; // whoknows
 }
 
 function GameShell({title,icon,children,reset}){
@@ -155,12 +168,34 @@ function WouldRather({room,me,update}){
 function WhoKnows({room,me,update}){
  return <ChoiceGame type="whoknows" title="Who Knows Who?" icon="👀" questions={WK.map(q=>[q,"You","Partner"])} room={room} me={me} update={update}/>;
 }
-function ChoiceGame({type,title,icon,questions,room,me,update}){
- const s=room.state||initialState(type),mine=room.host_id===me?"host":"guest",other=mine==="host"?"guest":"host",q=questions[s.i];
+function ChoiceGame({type,title,icon,questions: defaultQuestions,room,me,update}){
+ const s=room.state||initialState(type),mine=room.host_id===me?"host":"guest",other=mine==="host"?"guest":"host";
+ const isHost = room.host_id === me;
+ 
+ useEffect(() => {
+   if (isHost && s.generating && (!s.deck || s.deck.length === 0)) {
+     generateGameContent(type, 5, room.code).then(newQuestions => {
+       const finalDeck = newQuestions.length > 0 ? newQuestions.map(q => {
+         if (type === 'wouldrather') return [q.question, "Option 1", "Option 2"]; // simplified options extraction
+         return [q.question, "You", "Partner"];
+       }) : defaultQuestions;
+       update({ state: { ...s, deck: finalDeck, generating: false } });
+     });
+   }
+ }, [isHost, s.generating, s.deck]);
+
+ if (s.generating) {
+   return <GameShell title={title} icon={icon}><div style={{textAlign:'center', padding:'2rem'}}><p>Creating your next challenge ✨</p></div></GameShell>;
+ }
+
+ const questions = s.deck && s.deck.length > 0 ? s.deck : defaultQuestions;
+ const q=questions[s.i];
+
  const choose=v=>{if(s.answers[mine]!=null)return;const answers={...s.answers,[mine]:v};const revealed=answers.host!=null&&answers.guest!=null;update({state:{...s,answers,revealed},status:"playing"})};
- const next=()=>{const same=s.answers.host===s.answers.guest;const ni=s.i+1;if(ni>=questions.length)update({state:{...initialState(type),i:0,done:true,matches:(s.matches||0)+(same?1:0)},status:"finished"});else update({state:{...initialState(type),i:ni,matches:(s.matches||0)+(same?1:0)},status:"playing"})};
- const reset=()=>update({state:initialState(type),status:"playing"});
+ const next=()=>{const same=s.answers.host===s.answers.guest;const ni=s.i+1;if(ni>=questions.length)update({state:{...initialState(type),i:0,done:true,matches:(s.matches||0)+(same?1:0), generating: false},status:"finished"});else update({state:{...s,i:ni,answers:{},revealed:false,matches:(s.matches||0)+(same?1:0)},status:"playing"})};
+ const reset=()=>update({state:{...initialState(type), generating: true},status:"playing"});
  if(s.done)return <GameShell title={title} icon={icon}><div className="result">💕 You matched {s.matches}/{questions.length}<button className="primary" onClick={reset}>Play again</button></div></GameShell>;
+ if(!q) return null;
  return <GameShell title={title} icon={icon}><div className="progress">Question {s.i+1} / {questions.length}</div><h3 className="question">{q[0]}</h3><div className="two-cols"><Choice name="You" value={s.answers[mine]} options={q.slice(1)} disabled={s.answers[mine]!=null} onPick={choose}/><div className="partner-card"><b>Partner</b><span>{s.revealed?(s.answers[other]??"—"):"🔒 Hidden"}</span></div></div>{s.revealed&&<button className="primary next" onClick={next}>Reveal → Next</button>}<p className="hint">Pick without looking at each other's answer.</p></GameShell>
 }
 function Choice({name,value,options,onPick,disabled}){return <div className="choice-card"><b>{name}</b>{options.map((o,i)=><button disabled={disabled} className={value===o?"selected":""} key={o} onClick={()=>onPick(o)}>{String.fromCharCode(65+i)} · {o}</button>)}</div>}
